@@ -30,8 +30,8 @@ pub struct RepoCommit {
     pub html_url: String,
     pub comments_url: String,
     pub commit: RepoCommitPage,
-    pub author: Option<User>,
-    pub committer: Option<User>,
+    pub author: Option<Author>,
+    pub committer: Option<Author>,
     pub parents: Vec<Commit>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,16 +119,16 @@ pub struct Commit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comments_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub author: Option<GitUser>,
+    pub author: Option<Author>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub committer: Option<GitUser>,
+    pub committer: Option<Author>,
 }
 
 /// The author of a commit, identified by its name and email, as well as (optionally) a time
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitUserTime {
     #[serde(flatten)]
-    pub user: GitUser,
+    pub user: CommitAuthor,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<DateTime<Utc>>,
@@ -137,7 +137,7 @@ pub struct GitUserTime {
 /// The author of a commit, identified by its name and email.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub struct GitUser {
+pub struct CommitAuthor {
     pub name: String,
     pub email: String,
 }
@@ -151,16 +151,24 @@ pub struct FileUpdate {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct FileDeletion {
+    pub content: Option<Content>,
+    pub commit: Commit,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct Content {
     pub name: String,
     pub path: String,
     pub sha: String,
+    pub encoding: Option<String>,
     /// File content, Base64 encoded
     pub content: Option<String>,
     pub size: i64,
     pub url: String,
-    pub html_url: String,
-    pub git_url: String,
+    pub html_url: Option<String>,
+    pub git_url: Option<String>,
     pub download_url: Option<String>,
     pub r#type: String,
     #[serde(rename = "_links")]
@@ -199,10 +207,11 @@ impl Content {
     /// # }
     /// ```
     pub fn decoded_content(&self) -> Option<String> {
+        use base64::Engine;
         self.content.as_ref().and_then(|c| {
             let mut content = c.as_bytes().to_owned();
             content.retain(|b| !b" \n\t\r\x0b\x0c".contains(b));
-            let c = base64::decode(&content).unwrap();
+            let c = base64::prelude::BASE64_STANDARD.decode(content).unwrap();
             Some(String::from_utf8_lossy(&c).into_owned())
         })
     }
@@ -230,8 +239,8 @@ impl crate::FromResponse for ContentItems {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ContentLinks {
-    pub git: Url,
-    pub html: Url,
+    pub git: Option<Url>,
+    pub html: Option<Url>,
     #[serde(rename = "self")]
     pub _self: Url,
 }
@@ -283,7 +292,7 @@ pub struct Release {
     pub prerelease: bool,
     pub created_at: Option<DateTime<Utc>>,
     pub published_at: Option<DateTime<Utc>>,
-    pub author: crate::models::User,
+    pub author: crate::models::Author,
     pub assets: Vec<Asset>,
 }
 
@@ -302,7 +311,7 @@ pub struct Asset {
     pub download_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub uploader: User,
+    pub uploader: CommitAuthor,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -10,12 +10,14 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 
 pub mod activity;
 pub mod apps;
+pub mod commits;
 pub mod events;
 pub mod gists;
 pub mod hooks;
 pub mod issues;
 pub mod orgs;
 pub mod pulls;
+pub mod reactions;
 pub mod repos;
 pub mod teams;
 pub mod workflows;
@@ -108,6 +110,7 @@ id_type!(
     ProjectColumnId,
     PullRequestId,
     PushId,
+    ReactionId,
     ReleaseId,
     RepositoryId,
     ReviewId,
@@ -117,7 +120,8 @@ id_type!(
     ThreadId,
     UserId,
     UserOrOrgId,
-    WorkflowId
+    WorkflowId,
+    TeamInvitationId
 );
 
 macro_rules! convert_into {
@@ -205,13 +209,13 @@ pub struct IssueEvent {
     pub node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    pub actor: User,
+    pub actor: Author,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignee: Option<User>,
+    pub assignee: Option<Author>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assignees: Option<Vec<User>>,
+    pub assignees: Option<Vec<Author>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub assigner: Option<User>,
+    pub assigner: Option<Author>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<Label>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -256,7 +260,7 @@ pub struct Project {
     pub number: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
-    pub creator: User,
+    pub creator: Author,
     pub created_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
@@ -298,7 +302,7 @@ pub struct IssuePullRequest {
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct User {
+pub struct Author {
     pub login: String,
     pub id: UserId,
     pub node_id: String,
@@ -317,6 +321,13 @@ pub struct User {
     pub received_events_url: Url,
     pub r#type: String,
     pub site_admin: bool,
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StarGazer {
+    pub starred_at: Option<DateTime<Utc>>,
+    pub user: Option<Author>,
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -348,7 +359,7 @@ pub struct Milestone {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub creator: Option<User>,
+    pub creator: Option<Author>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub open_issues: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -372,7 +383,7 @@ pub struct Repository {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub owner: Option<User>,
+    pub owner: Option<Author>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub private: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -534,21 +545,20 @@ pub struct Repository {
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositoryFile {
-    pub name : Option<String>,
+    pub name: Option<String>,
     pub key: Option<String>,
-    pub url : Option<Url>,
-    pub html_url : Option<Url>,
+    pub url: Option<Url>,
+    pub html_url: Option<Url>,
 }
-
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RepositoryMetrics {
-    pub health_percentage : u64,
+    pub health_percentage: u64,
     pub description: Option<String>,
-    pub documentation : Option<String>,
+    pub documentation: Option<String>,
     pub files: HashMap<String, Option<RepositoryFile>>,
     pub updated_at: Option<DateTime<Utc>>,
-    pub content_reports_enabled: Option<bool>
+    pub content_reports_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -672,7 +682,7 @@ pub struct Status {
     pub updated_at: Option<DateTime<Utc>>,
     pub state: StatusState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub creator: Option<User>,
+    pub creator: Option<Author>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
 }
@@ -699,7 +709,7 @@ pub struct InstallationRepositories {
 #[non_exhaustive]
 pub struct Installation {
     pub id: InstallationId,
-    pub account: User,
+    pub account: Author,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_tokens_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -760,29 +770,28 @@ pub struct PublicKey {
     pub key: String,
 }
 
-
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RateLimit {
     pub resources: Resources,
-    pub rate:      Rate,
+    pub rate: Rate,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Resources {
-    pub core:                        Rate,
-    pub search:                      Rate,
-    pub graphql:                     Option<Rate>,
-    pub integration_manifest:        Option<Rate>,
-    pub scim:                        Option<Rate>,
-    pub source_import:               Option<Rate>,
-    pub code_scanning_upload:        Option<Rate>,
+    pub core: Rate,
+    pub search: Rate,
+    pub graphql: Option<Rate>,
+    pub integration_manifest: Option<Rate>,
+    pub scim: Option<Rate>,
+    pub source_import: Option<Rate>,
+    pub code_scanning_upload: Option<Rate>,
     pub actions_runner_registration: Option<Rate>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rate {
-    pub limit:     usize,
-    pub used:      usize,
+    pub limit: usize,
+    pub used: usize,
     pub remaining: usize,
-    pub reset:     usize,
+    pub reset: usize,
 }

@@ -15,9 +15,9 @@ mod status;
 mod tags;
 
 use crate::{models, params, Octocrab, Result};
+pub use branches::ListBranchesBuilder;
 pub use commits::ListCommitsBuilder;
-pub use file::GetContentBuilder;
-pub use file::UpdateFileBuilder;
+pub use file::{DeleteFileBuilder, GetContentBuilder, UpdateFileBuilder};
 pub use generate::GenerateRepositoryBuilder;
 pub use pulls::ListPullsBuilder;
 pub use releases::ReleasesHandler;
@@ -211,7 +211,7 @@ impl<'octo> RepoHandler<'octo> {
     /// Creates a new file in the repository.
     /// ```no_run
     /// # async fn run() -> octocrab::Result<()> {
-    /// use octocrab::models::repos::GitUser;
+    /// use octocrab::models::repos::CommitAuthor;
     ///
     /// // Commit to add "crabs/ferris.txt"
     /// octocrab::instance()
@@ -222,11 +222,11 @@ impl<'octo> RepoHandler<'octo> {
     ///         "Thought there’d never be a Rust Rap?\n"
     ///     )
     ///     .branch("master")
-    ///     .commiter(GitUser {
+    ///     .commiter(CommitAuthor {
     ///         name: "Octocat".to_string(),
     ///         email: "octocat@github.com".to_string(),
     ///     })
-    ///     .author(GitUser {
+    ///     .author(CommitAuthor {
     ///         name: "Ferris".to_string(),
     ///         email: "ferris@rust-lang.org".to_string(),
     ///     })
@@ -241,11 +241,12 @@ impl<'octo> RepoHandler<'octo> {
         message: impl Into<String>,
         content: impl AsRef<[u8]>,
     ) -> UpdateFileBuilder<'_, '_> {
+        use base64::Engine;
         UpdateFileBuilder::new(
             self,
             path.into(),
             message.into(),
-            base64::encode(content),
+            base64::prelude::BASE64_STANDARD.encode(content),
             None,
         )
     }
@@ -253,7 +254,7 @@ impl<'octo> RepoHandler<'octo> {
     /// ```no_run
     /// # async fn run() -> octocrab::Result<()> {
     /// # let blob_sha = "";
-    /// use octocrab::models::repos::GitUser;
+    /// use octocrab::models::repos::CommitAuthor;
     ///
     /// // Given the file blob for "crabs/ferris.txt", commit to update the file.
     /// octocrab::instance()
@@ -265,11 +266,11 @@ impl<'octo> RepoHandler<'octo> {
     ///         blob_sha
     ///     )
     ///     .branch("master")
-    ///     .commiter(GitUser {
+    ///     .commiter(CommitAuthor {
     ///         name: "Octocat".to_string(),
     ///         email: "octocat@github.com".to_string(),
     ///     })
-    ///     .author(GitUser {
+    ///     .author(CommitAuthor {
     ///         name: "Ferris".to_string(),
     ///         email: "ferris@rust-lang.org".to_string(),
     ///     })
@@ -285,13 +286,51 @@ impl<'octo> RepoHandler<'octo> {
         content: impl AsRef<[u8]>,
         sha: impl Into<String>,
     ) -> UpdateFileBuilder<'_, '_> {
+        use base64::Engine;
         UpdateFileBuilder::new(
             self,
             path.into(),
             message.into(),
-            base64::encode(content),
+            base64::prelude::BASE64_STANDARD.encode(content),
             Some(sha.into()),
         )
+    }
+
+    /// Deletes a file in the repository.
+    /// ```no_run
+    /// # async fn run() -> octocrab::Result<()> {
+    /// # let blob_sha = "";
+    /// use octocrab::models::repos::CommitAuthor;
+    ///
+    /// // Commit to delete "crabs/ferris.txt"
+    /// octocrab::instance()
+    ///     .repos("owner", "repo")
+    ///     .delete_file(
+    ///         "crabs/ferris.txt",
+    ///         "Deleted ferris.txt",
+    ///         blob_sha
+    ///     )
+    ///     .branch("master")
+    ///     .commiter(CommitAuthor {
+    ///         name: "Octocat".to_string(),
+    ///         email: "octocat@github.com".to_string(),
+    ///     })
+    ///     .author(CommitAuthor {
+    ///         name: "Ferris".to_string(),
+    ///         email: "ferris@rust-lang.org".to_string(),
+    ///     })
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn delete_file(
+        &self,
+        path: impl Into<String>,
+        message: impl Into<String>,
+        sha: impl Into<String>,
+    ) -> DeleteFileBuilder<'_, '_> {
+        DeleteFileBuilder::new(self, path.into(), message.into(), sha.into())
     }
 
     /// List tags from a repository.
@@ -484,5 +523,17 @@ impl<'octo> RepoHandler<'octo> {
             reference = reference.into(),
         ))?;
         self.crab._get(url, None::<&()>).await
+    }
+
+    /// Check if a user is a repository collaborator
+    pub async fn is_collaborator(&self, username: impl AsRef<str>) -> Result<bool> {
+        let url = self.crab.absolute_url(format!(
+            "/repos/{owner}/{repo}/collaborators/{username}",
+            owner = self.owner,
+            repo = self.repo,
+            username = username.as_ref(),
+        ))?;
+        let response = self.crab._get(url, None::<&()>).await?;
+        Ok(response.status().is_success())
     }
 }

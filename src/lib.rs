@@ -78,7 +78,7 @@
 //!
 //! ```no_run
 //! # async fn run() -> octocrab::Result<()> {
-//! let user: octocrab::models::User = octocrab::instance()
+//! let user: octocrab::models::Author = octocrab::instance()
 //!     .get("user", None::<&()>)
 //!     .await?;
 //! # Ok(())
@@ -171,13 +171,17 @@ use models::{AppId, InstallationId, InstallationToken};
 
 pub use self::{
     api::{
-        actions, activity, apps, current, events, gists, gitignore, issues, licenses, markdown,
-        orgs, pulls, repos, search, teams, workflows, ratelimit,
+        actions, activity, apps, commits, current, events, gists, gitignore, issues, licenses,
+        markdown, orgs, pulls, ratelimit, repos, search, teams, workflows,
     },
     error::{Error, GitHubError},
     from_response::FromResponse,
     page::Page,
 };
+
+use tracing::{self, field};
+
+const GITHUB_SERVICE: &str = "github.com";
 
 /// A convenience type with a default error type of [`Error`].
 pub type Result<T, E = error::Error> = std::result::Result<T, E>;
@@ -250,6 +254,13 @@ pub fn instance() -> Arc<Octocrab> {
     STATIC_INSTANCE.load().clone()
 }
 
+/// RetryPredicate callback type. Receives a request's response status code and returns whether Octocrab should attempt a retry.
+type RetryPredicate = fn(StatusCode) -> bool;
+
+fn default_retry_predicate(code: StatusCode) -> bool {
+    return code == StatusCode::UNAUTHORIZED;
+}
+
 /// A builder struct for `Octocrab`, allowing you to configure the client, such
 /// as using GitHub previews, the github instance, authentication, etc.
 /// ```
@@ -267,6 +278,7 @@ pub struct OctocrabBuilder {
     previews: Vec<&'static str>,
     extra_headers: Vec<(HeaderName, String)>,
     base_url: Option<Url>,
+    retry_predicate: Option<RetryPredicate>,
 }
 
 impl OctocrabBuilder {
@@ -302,7 +314,13 @@ impl OctocrabBuilder {
     /// Authenticate as a Basic Auth
     /// username and password
     pub fn basic_auth(mut self, username: String, password: String) -> Self {
-        self.auth = Auth::Basic{ username, password };
+        self.auth = Auth::Basic { username, password };
+        self
+    }
+
+    /// Authenticate with an OAuth token.
+    pub fn oauth(mut self, oauth: auth::OAuth) -> Self {
+        self.auth = Auth::OAuth(oauth);
         self
     }
 
@@ -310,6 +328,12 @@ impl OctocrabBuilder {
     pub fn base_url(mut self, base_url: impl reqwest::IntoUrl) -> Result<Self> {
         self.base_url = Some(base_url.into_url().context(crate::error::HttpSnafu)?);
         Ok(self)
+    }
+
+    /// Set the predicate callback used to determine if a request should be retried.
+    pub fn retry_predicate(mut self, predicate: RetryPredicate) -> Self {
+        self.retry_predicate = Some(predicate);
+        self
     }
 
     /// Create the `Octocrab` client.
@@ -325,7 +349,7 @@ impl OctocrabBuilder {
 
         let auth_state = match self.auth {
             Auth::None => AuthState::None,
-            Auth::Basic{ username, password } => AuthState::BasicAuth { username, password },
+            Auth::Basic { username, password } => AuthState::BasicAuth { username, password },
             Auth::PersonalToken(token) => {
                 hmap.append(
                     reqwest::header::AUTHORIZATION,
@@ -336,6 +360,15 @@ impl OctocrabBuilder {
                 AuthState::None
             }
             Auth::App(app_auth) => AuthState::App(app_auth),
+            Auth::OAuth(device) => {
+                hmap.append(
+                    reqwest::header::AUTHORIZATION,
+                    (device.token_type + " " + &device.access_token.expose_secret())
+                        .parse()
+                        .unwrap(),
+                );
+                AuthState::None
+            }
         };
 
         for (key, value) in self.extra_headers.into_iter() {
@@ -354,6 +387,7 @@ impl OctocrabBuilder {
                 .base_url
                 .unwrap_or_else(|| Url::parse(GITHUB_BASE_URL).unwrap()),
             auth_state,
+            retry_predicate: self.retry_predicate.unwrap_or(default_retry_predicate),
         })
     }
 }
@@ -433,6 +467,7 @@ pub struct Octocrab {
     client: reqwest::Client,
     pub base_url: Url,
     auth_state: AuthState,
+    retry_predicate: RetryPredicate,
 }
 
 /// Defaults for Octocrab:
@@ -448,6 +483,7 @@ impl Default for Octocrab {
                 .build()
                 .unwrap(),
             auth_state: AuthState::None,
+            retry_predicate: default_retry_predicate,
         }
     }
 }
@@ -480,6 +516,7 @@ impl Octocrab {
                 installation: id,
                 token: CachedToken::default(),
             },
+            retry_predicate: default_retry_predicate,
         }
     }
 
@@ -537,6 +574,14 @@ impl Octocrab {
         repo: impl Into<String>,
     ) -> issues::IssueHandler {
         issues::IssueHandler::new(self, owner.into(), repo.into())
+    }
+
+    pub fn commits(
+        &self,
+        owner: impl Into<String>,
+        repo: impl Into<String>,
+    ) -> commits::CommitHandler {
+        commits::CommitHandler::new(self, owner.into(), repo.into())
     }
 
     /// Creates a [`licenses::LicenseHandler`].
@@ -683,8 +728,7 @@ impl Octocrab {
         P: Serialize + ?Sized,
         R: FromResponse,
     {
-        let response = self._get(self.absolute_url(route)?, parameters).await?;
-        R::from_response(crate::map_github_error(response).await?).await
+        self.get_with_headers(route, parameters, None).await
     }
 
     /// Send a `GET` request with no additional post-processing.
@@ -693,10 +737,43 @@ impl Octocrab {
         url: impl reqwest::IntoUrl,
         parameters: Option<&P>,
     ) -> Result<reqwest::Response> {
+        self._get_with_headers(url, parameters, None).await
+    }
+
+    /// Send a `GET` request to `route` with optional query parameters and headers, returning
+    /// the body of the response.
+    pub async fn get_with_headers<R, A, P>(
+        &self,
+        route: A,
+        parameters: Option<&P>,
+        headers: Option<reqwest::header::HeaderMap>,
+    ) -> Result<R>
+    where
+        A: AsRef<str>,
+        P: Serialize + ?Sized,
+        R: FromResponse,
+    {
+        let response = self
+            ._get_with_headers(self.absolute_url(route)?, parameters, headers)
+            .await?;
+        R::from_response(crate::map_github_error(response).await?).await
+    }
+
+    /// Send a `GET` request including option to set headers, with no additional post-processing.
+    pub async fn _get_with_headers<P: Serialize + ?Sized>(
+        &self,
+        url: impl reqwest::IntoUrl,
+        parameters: Option<&P>,
+        headers: Option<reqwest::header::HeaderMap>,
+    ) -> Result<reqwest::Response> {
         let mut request = self.client.get(url);
 
         if let Some(parameters) = parameters {
             request = request.query(parameters);
+        }
+
+        if let Some(headers) = headers {
+            request = request.headers(headers)
         }
 
         self.execute(request).await
@@ -844,24 +921,57 @@ impl Octocrab {
         }
     }
 
+    #[tracing::instrument(
+        level="debug",
+        name="github api call",
+        skip(self, request_builder, attempt),
+        fields(err, url=field::Empty, service.name=field::Empty, http.method=field::Empty, http.url=field::Empty, http.status_code=field::Empty, http.resend_count=field::Empty)
+    )]
+    async fn send_call(
+        &self,
+        request_builder: reqwest::RequestBuilder,
+        attempt: u32,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let span = tracing::Span::current();
+        let service = self.base_url.host_str().unwrap_or(GITHUB_SERVICE);
+        span.record("service.name", &service);
+        if attempt > 1 {
+            span.record("http.resend_count", &attempt);
+        }
+        let request = request_builder.build()?;
+        span.record("http.method", &request.method().as_str());
+        span.record("http.url", &request.url().as_str());
+        let result = self.client.execute(request).await;
+        match &result {
+            Ok(v) => {
+                span.record("http.status_code", &v.status().as_u16());
+            }
+            Err(e) => {
+                let status = e.status().and_then(|s| Some(s.as_u16()));
+                span.record("http.status_code", &status.unwrap_or_default());
+            }
+        };
+        result
+    }
+
     /// Execute the given `request` using octocrab's Client.
     pub async fn execute(&self, mut request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-        let mut retries = 0;
+        let mut retries = 1;
         loop {
             // Saved request that we can retry later if necessary
-            let mut retry_request = None;
+            let retry_request = request.try_clone().unwrap();
             match self.auth_state {
                 AuthState::None => (),
                 AuthState::App(ref app) => {
-                    retry_request = Some(request.try_clone().unwrap());
                     request = request.bearer_auth(app.generate_bearer_token()?);
                 }
-                AuthState::BasicAuth { ref username, ref password } => {
-                    retry_request = Some(request.try_clone().unwrap());
+                AuthState::BasicAuth {
+                    ref username,
+                    ref password,
+                } => {
                     request = request.basic_auth(username, Some(password));
                 }
                 AuthState::Installation { ref token, .. } => {
-                    retry_request = Some(request.try_clone().unwrap());
                     let token = if let Some(token) = token.get() {
                         token
                     } else {
@@ -871,19 +981,22 @@ impl Octocrab {
                 }
             };
 
-            let result = request.send().await;
+            let result = self.send_call(request, retries).await;
             let status = match &result {
                 Ok(v) => Some(v.status()),
                 Err(e) => e.status(),
             };
-            if let Some(StatusCode::UNAUTHORIZED) = status {
-                if let AuthState::Installation { ref token, .. } = self.auth_state {
-                    token.clear();
-                }
-                if let Some(retry) = retry_request {
+            if let Some(code) = status {
+                if (self.retry_predicate)(code) {
+                    // If using App installation tokens, try to grab a fresh one if the response is 'unauthorized'.
+                    if code == StatusCode::UNAUTHORIZED {
+                        if let AuthState::Installation { ref token, .. } = self.auth_state {
+                            token.clear();
+                        }
+                    }
                     if retries < MAX_RETRIES {
                         retries += 1;
-                        request = retry;
+                        request = retry_request;
                         continue;
                     }
                 }
@@ -1006,5 +1119,67 @@ mod tests {
             .send()
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_retries_on_unauth_only() {
+        use reqwest::StatusCode;
+        use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+        let mock_server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(".*"))
+            .respond_with(ResponseTemplate::new(StatusCode::INTERNAL_SERVER_ERROR))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        let result = crate::OctocrabBuilder::default()
+            .base_url(mock_server.uri())
+            .unwrap()
+            .build()
+            .unwrap()
+            .orgs("hello")
+            .get()
+            .await;
+        assert_eq!(result.is_err(), true);
+
+        let mock_server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(".*"))
+            .respond_with(ResponseTemplate::new(StatusCode::UNAUTHORIZED))
+            .expect(3)
+            .mount(&mock_server)
+            .await;
+        let result = crate::OctocrabBuilder::default()
+            .base_url(mock_server.uri())
+            .unwrap()
+            .build()
+            .unwrap()
+            .orgs("hello")
+            .get()
+            .await;
+        assert_eq!(result.is_err(), true);
+    }
+
+    #[tokio::test]
+    async fn retries_based_on_predicate() {
+        use reqwest::StatusCode;
+        use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
+        let mock_server = MockServer::start().await;
+        Mock::given(matchers::method("GET"))
+            .and(matchers::path_regex(".*"))
+            .respond_with(ResponseTemplate::new(StatusCode::INTERNAL_SERVER_ERROR))
+            .expect(3)
+            .mount(&mock_server)
+            .await;
+        let result = crate::OctocrabBuilder::default()
+            .base_url(mock_server.uri())
+            .unwrap()
+            .retry_predicate(|code| code.is_server_error())
+            .build()
+            .unwrap()
+            .orgs("hello")
+            .get()
+            .await;
+        assert_eq!(result.is_err(), true);
     }
 }

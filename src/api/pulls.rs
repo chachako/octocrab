@@ -4,12 +4,16 @@ mod comment;
 mod create;
 mod list;
 mod merge;
+mod update;
 
 use snafu::ResultExt;
 
 use crate::{Octocrab, Page};
 
-pub use self::{create::CreatePullRequestBuilder, list::ListPullRequestsBuilder};
+pub use self::{
+    create::CreatePullRequestBuilder, list::ListPullRequestsBuilder,
+    update::UpdatePullRequestBuilder,
+};
 
 /// A client to GitHub's pull request API.
 ///
@@ -195,6 +199,25 @@ impl<'octo> PullRequestHandler<'octo> {
         create::CreatePullRequestBuilder::new(self, title, head, base)
     }
 
+    /// Update a new pull request.
+    ///
+    /// - `pull_number` — pull request number.
+    /// ```no_run
+    /// # async fn run() -> octocrab::Result<()> {
+    /// # let octocrab = octocrab::Octocrab::default();
+    /// let pr = octocrab
+    ///     .pulls("owner", "repo")
+    ///     .update(1)
+    ///     .body("hello world!")
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn update(&self, pull_number: u64) -> update::UpdatePullRequestBuilder<'octo, '_> {
+        update::UpdatePullRequestBuilder::new(self, pull_number)
+    }
+
     /// Creates a new `ListPullRequestsBuilder` that can be configured to filter
     /// listing pulling requests.
     /// ```no_run
@@ -237,6 +260,35 @@ impl<'octo> PullRequestHandler<'octo> {
         );
 
         self.http_get(url, None::<&()>).await
+    }
+
+    /// Request a review from users or teams.
+    /// ```no_run
+    /// # async fn run() -> octocrab::Result<()> {
+    /// let review = octocrab::instance().pulls("owner", "repo")
+    ///    .request_reviews(101, ["user1".to_string(), "user2".to_string()], ["team1".to_string(), "team2".to_string()])
+    ///  .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn request_reviews(
+        &self,
+        pr: u64,
+        reviewers: impl Into<Vec<String>>,
+        team_reviewers: impl Into<Vec<String>>,
+    ) -> crate::Result<crate::models::pulls::Review> {
+        let url = format!(
+            "repos/{owner}/{repo}/pulls/{pr}/requested_reviewers",
+            owner = self.owner,
+            repo = self.repo,
+            pr = pr
+        );
+
+        let mut map = serde_json::Map::new();
+        map.insert("reviewers".to_string(), reviewers.into().into());
+        map.insert("team_reviewers".to_string(), team_reviewers.into().into());
+
+        self.crab.post(url, Some(&map)).await
     }
 
     /// List all `FileDiff`s associated with the pull request.
@@ -354,6 +406,19 @@ impl<'octo> PullRequestHandler<'octo> {
         R: crate::FromResponse,
     {
         let mut request = self.crab.client.put(self.crab.absolute_url(route)?);
+
+        request = self.build_request(request, body);
+
+        R::from_response(crate::map_github_error(self.crab.execute(request).await?).await?).await
+    }
+
+    pub(crate) async fn http_patch<R, A, P>(&self, route: A, body: Option<&P>) -> crate::Result<R>
+    where
+        A: AsRef<str>,
+        P: serde::Serialize + ?Sized,
+        R: crate::FromResponse,
+    {
+        let mut request = self.crab.client.patch(self.crab.absolute_url(route)?);
 
         request = self.build_request(request, body);
 

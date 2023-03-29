@@ -1,28 +1,29 @@
 use super::*;
+use crate::{models, Page, Result};
 
 #[derive(serde::Serialize)]
-pub struct ListCommitsBuilder<'octo, 'b> {
+pub struct ListTeamMembersBuilder<'octo, 'r> {
     #[serde(skip)]
-    handler: &'b GistsHandler<'octo>,
+    handler: &'r TeamHandler<'octo>,
     #[serde(skip)]
-    gist_id: String,
+    slug: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     per_page: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     page: Option<u32>,
 }
 
-impl<'octo, 'b> ListCommitsBuilder<'octo, 'b> {
-    pub(crate) fn new(handler: &'b GistsHandler<'octo>, gist_id: String) -> Self {
+impl<'octo, 'r> ListTeamMembersBuilder<'octo, 'r> {
+    pub(crate) fn new(handler: &'r TeamHandler<'octo>, slug: String) -> Self {
         Self {
             handler,
-            gist_id,
+            slug,
             per_page: None,
             page: None,
         }
     }
 
-    /// Results per page (max 100).
+    /// Results per page.
     pub fn per_page(mut self, per_page: impl Into<u8>) -> Self {
         self.per_page = Some(per_page.into());
         self
@@ -35,8 +36,12 @@ impl<'octo, 'b> ListCommitsBuilder<'octo, 'b> {
     }
 
     /// Sends the actual request.
-    pub async fn send(self) -> crate::Result<crate::Page<crate::models::gists::GistCommit>> {
-        let url = format!("gists/{gist_id}/commits", gist_id = self.gist_id);
+    pub async fn send(self) -> Result<Page<models::Author>> {
+        let url = format!(
+            "orgs/{org}/teams/{team}/members",
+            org = self.handler.owner,
+            team = self.slug,
+        );
         self.handler.crab.get(url, Some(&self)).await
     }
 }
